@@ -9,7 +9,17 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from pydantic import BaseSettings, Field
+try:
+    # Pydantic v2
+    from pydantic import BaseSettings, Field
+except ImportError:
+    # Pydantic v1 fallback
+    from pydantic import BaseModel, Field
+    
+    class BaseSettings(BaseModel):
+        class Config:
+            env_file = ".env"
+            env_file_encoding = "utf-8"
 
 
 class Config(BaseSettings):
@@ -50,12 +60,19 @@ class Config(BaseSettings):
         env_file = ".env"
         env_file_encoding = "utf-8"
     
-    def __post_init__(self):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._post_init()
+    
+    def _post_init(self):
         """初期化後処理"""
         # デバイス設定の自動判定
         if self.device == "auto":
-            import torch
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            try:
+                import torch
+                self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            except ImportError:
+                self.device = "cpu"
         
         # ディレクトリ作成
         Path(self.model_path).parent.mkdir(parents=True, exist_ok=True)
