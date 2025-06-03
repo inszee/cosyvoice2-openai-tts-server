@@ -9,23 +9,35 @@ Dify用のCosyVoice2を使用したOpenAI API互換のTTSサーバーです。
 - **多言語対応**（中国語、英語、日本語、韓国語、方言）
 - **Zero-shot音声クローニング**
 - **ストリーミング対応**（低遅延150ms）
-- **Docker対応**
+- **Docker対応**（CPU/GPU両対応）
 - **Dify直接統合可能**
 
 ## 📦 クイックスタート
 
-### Docker を使用した起動
+### 🐳 Docker使用（推奨）
 
+#### GPU版（推奨）
 ```bash
-# リポジトリをクローン
 git clone https://github.com/ShunsukeTamura06/cosyvoice2-openai-tts-server.git
 cd cosyvoice2-openai-tts-server
 
-# Docker Composeで起動
-docker-compose up -d
+# GPU版で起動
+docker-compose --profile gpu up -d
+
+# ログ確認
+docker-compose logs -f cosyvoice-tts-gpu
 ```
 
-### 手動セットアップ
+#### CPU版（GPUが利用できない場合）
+```bash
+# CPU版で起動
+docker-compose --profile cpu up -d
+
+# ログ確認
+docker-compose logs -f cosyvoice-tts-cpu
+```
+
+#### 🔧 手動セットアップ
 
 1. **環境構築**
 
@@ -45,7 +57,18 @@ bash setup.sh
 2. **サーバー起動**
 
 ```bash
+# 自動起動スクリプト
+./start_server.sh
+
+# または手動起動
 python app.py
+```
+
+3. **動作確認**
+
+```bash
+# テストスクリプト実行
+python test_server.py
 ```
 
 ## 🔧 API使用例
@@ -120,6 +143,33 @@ response = client.audio.speech.create(
    - **Model Type**: `TTS`
    - **Model Name**: `cosyvoice2-0.5b`
 
+## 🐳 Docker使用方法
+
+### プロファイル使用
+
+```bash
+# GPU版（最高性能）
+docker-compose --profile gpu up -d
+
+# CPU版（GPUなし環境）
+docker-compose --profile cpu up -d
+
+# 開発版（デバッグ用）
+docker-compose --profile dev up -d
+```
+
+### 個別ビルド
+
+```bash
+# GPU版
+docker build -f Dockerfile -t cosyvoice-tts:gpu .
+docker run -d --gpus all -p 8000:8000 cosyvoice-tts:gpu
+
+# CPU版
+docker build -f Dockerfile.cpu -t cosyvoice-tts:cpu .
+docker run -d -p 8000:8000 cosyvoice-tts:cpu
+```
+
 ## 📊 対応音声形式
 
 - **入力**: テキスト（任意の言語）
@@ -128,10 +178,12 @@ response = client.audio.speech.create(
 
 ## ⚡ パフォーマンス
 
-- **初回応答遅延**: 150ms
-- **リアルタイム係数**: <1.0 (ストリーミング時)
-- **GPU使用**: 推奨（CPUでも動作可能）
-- **メモリ使用量**: 約4GB（モデル読み込み時）
+| 項目 | GPU版 | CPU版 |
+|------|-------|-------|
+| 初回応答遅延 | 150ms | 2-5秒 |
+| リアルタイム係数 | <1.0 | 3-10 |
+| 推奨メモリ | 4GB | 8GB |
+| ストリーミング | ✅ | ❌ |
 
 ## ⚙️ 環境変数
 
@@ -157,18 +209,31 @@ CONCURRENT_REQUESTS=4
 
 ## 🔧 トラブルシューティング
 
-### メモリ不足
+### Dockerエラー
 
+#### "nvidia/cuda image not found"
 ```bash
-# GPU メモリ不足の場合
-export CUDA_VISIBLE_DEVICES=""  # CPU強制使用
+# CPU版を使用
+docker-compose --profile cpu up -d
+```
 
-# または FP16 無効化
+#### メモリ不足
+```bash
+# 軽量設定で起動
+export MAX_TEXT_LENGTH=200
+export CONCURRENT_REQUESTS=1
+docker-compose --profile cpu up -d
+```
+
+### 手動セットアップエラー
+
+#### GPU メモリ不足
+```bash
+export CUDA_VISIBLE_DEVICES=""  # CPU強制使用
 export FP16=false
 ```
 
-### モデルダウンロードエラー
-
+#### モデルダウンロード失敗
 ```bash
 # 手動ダウンロード
 python -c "
@@ -177,8 +242,7 @@ snapshot_download('iic/CosyVoice2-0.5B', local_dir='./pretrained_models/CosyVoic
 "
 ```
 
-### 中国語音声合成問題
-
+#### 中国語音声合成問題
 ```bash
 # TTSFRD リソース インストール
 cd pretrained_models/CosyVoice-ttsfrd/
@@ -186,6 +250,12 @@ unzip resource.zip -d .
 pip install ttsfrd_dependency-0.1-py3-none-any.whl
 pip install ttsfrd-0.4.2-cp310-cp310-linux_x86_64.whl
 ```
+
+## 📚 詳細ドキュメント
+
+- [使用ガイド & デモ](USAGE.md)
+- [Docker各種選択肢](#-docker使用方法)
+- [API仕様](http://localhost:8000/docs) (サーバー起動後)
 
 ## 📄 ライセンス
 
