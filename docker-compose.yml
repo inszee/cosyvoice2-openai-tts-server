@@ -1,11 +1,12 @@
 version: '3.8'
 
 services:
-  cosyvoice-tts:
+  # GPU版（推奨）
+  cosyvoice-tts-gpu:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: cosyvoice-tts-server
+    container_name: cosyvoice-tts-server-gpu
     ports:
       - "8000:8000"
     environment:
@@ -34,18 +35,70 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 120s
+    profiles:
+      - gpu
 
-  # Optional: Redis for caching (future enhancement)
-  # redis:
-  #   image: redis:7-alpine
-  #   container_name: cosyvoice-redis
-  #   ports:
-  #     - "6379:6379"
-  #   restart: unless-stopped
+  # CPU版（GPUが利用できない場合）
+  cosyvoice-tts-cpu:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    container_name: cosyvoice-tts-server-cpu
+    ports:
+      - "8000:8000"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      - DEBUG=false
+      - DEVICE=cpu
+      - FP16=false
+      - STREAMING=false  # CPUでは無効
+      - MAX_TEXT_LENGTH=500  # CPUでは短めに
+      - CONCURRENT_REQUESTS=2  # CPUでは少なく
+    volumes:
+      - ./pretrained_models:/app/pretrained_models
+      - ./cache:/app/cache
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 180s  # CPUは起動に時間がかかる
+    profiles:
+      - cpu
+
+  # 開発用（軽量版）
+  cosyvoice-tts-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    container_name: cosyvoice-tts-dev
+    ports:
+      - "8001:8000"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      - DEBUG=true
+      - DEVICE=cpu
+      - FP16=false
+      - STREAMING=false
+      - MAX_TEXT_LENGTH=200
+      - CONCURRENT_REQUESTS=1
+      - LOG_LEVEL=DEBUG
+    volumes:
+      - ./pretrained_models:/app/pretrained_models
+      - ./cache:/app/cache
+      - ./logs:/app/logs
+      - .:/app/src  # ソースコードをマウント（開発用）
+    restart: "no"
+    profiles:
+      - dev
 
 volumes:
-  models:
+  pretrained_models:
   cache:
   logs:
 
