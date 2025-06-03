@@ -1,0 +1,469 @@
+#!/usr/bin/env python3
+"""
+CosyVoice2 Client Wrapper
+
+CosyVoice2モデルのラッパークラス
+音声合成、クローニング機能を提供
+"""
+
+import asyncio
+import io
+import logging
+import os
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+from typing import AsyncGenerator, Dict, List, Optional, Tuple
+
+import numpy as np
+import soundfile as sf
+import torch
+import torchaudio
+from concurrent.futures import ThreadPoolExecutor
+
+logger = logging.getLogger(__name__)
+
+
+class CosyVoiceClient:
+    """CosyVoice2クライアント"""
+    
+    def __init__(self, config):
+        self.config = config
+        self.model = None
+        self.sample_rate = 22050
+        self.executor = ThreadPoolExecutor(max_workers=config.concurrent_requests)
+        self.custom_speakers = {}
+        self.model_lock = threading.Lock()
+        
+        # デフォルト音声マッピング (OpenAI互換)
+        self.voice_mapping = {
+            "alloy": "中文女",
+            "echo": "中文男",
+            "fable": "英文女",
+            "onyx": "英文男",
+            "nova": "日文女",
+            "shimmer": "韩文女",
+        }
+    
+    async def initialize(self):
+        """クライアント初期化"""
+        try:
+            await self._setup_environment()
+            await self._load_model()
+            logger.info("CosyVoice client initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize CosyVoice client: {e}")
+            raise
+    
+    async def _setup_environment(self):
+        """環境セットアップ"""
+        # CosyVoiceのパス設定
+        cosyvoice_path = Path("./CosyVoice")
+        if cosyvoice_path.exists():
+            sys.path.insert(0, str(cosyvoice_path))
+            sys.path.insert(0, str(cosyvoice_path / "third_party" / "Matcha-TTS"))
+        
+        # モデルディレクトリ作成
+        model_dir = Path(self.config.model_path)
+        model_dir.mkdir(parents=True, exist_ok=True)
+        
+        # モデルダウンロード（未存在の場合）
+        if not (model_dir / "cosyvoice.yaml").exists():
+            await self._download_models()
+    
+    async def _download_models(self):
+        """モデルダウンロード"""
+        logger.info("Downloading CosyVoice2 models...")
+        
+        def download():
+            try:
+                from modelscope import snapshot_download
+                
+                # CosyVoice2-0.5B (推奨)
+                snapshot_download(
+                    'iic/CosyVoice2-0.5B',
+                    local_dir=self.config.model_path
+                )
+                
+                # TTSFRD リソース (中国語正規化用)
+                ttsfrd_path = "./pretrained_models/CosyVoice-ttsfrd"
+                Path(ttsfrd_path).mkdir(parents=True, exist_ok=True)
+                snapshot_download(
+                    'iic/CosyVoice-ttsfrd',
+                    local_dir=ttsfrd_path
+                )
+                
+                logger.info("Models downloaded successfully")
+                
+            except Exception as e:
+                logger.error(f"Failed to download models: {e}")
+                raise
+        
+        await asyncio.get_event_loop().run_in_executor(self.executor, download)
+    
+    async def _load_model(self):
+        """モデル読み込み"""
+        def load():
+            try:
+                # CosyVoiceインポート
+                from cosyvoice.cli.cosyvoice import CosyVoice2
+                
+                # モデル初期化
+                self.model = CosyVoice2(
+                    self.config.model_path,
+                    load_jit=False,
+                    load_trt=False,
+                    load_vllm=False,
+                    fp16=self.config.fp16
+                )
+                
+                self.sample_rate = self.model.sample_rate
+                logger.info(f"Model loaded, sample rate: {self.sample_rate}")
+                
+            except Exception as e:
+                logger.error(f"Failed to load model: {e}")
+                raise
+        
+        await asyncio.get_event_loop().run_in_executor(self.executor, load)
+    
+    def is_model_loaded(self) -> bool:
+        """モデル読み込み状態確認"""
+        return self.model is not None
+    
+    def is_gpu_available(self) -> bool:
+        """GPU使用可能性確認"""
+        return torch.cuda.is_available() and self.config.device != "cpu"
+    
+    async def list_available_voices(self) -> List[Dict]:
+        """利用可能音声一覧"""
+        voices = []
+        
+        # デフォルト音声
+        for voice_id, speaker in self.voice_mapping.items():
+            voices.append({
+                "id": voice_id,
+                "name": voice_id.title(),
+                "speaker": speaker,
+                "language": self._get_language_from_speaker(speaker),
+                "type": "preset"
+            })
+        
+        # カスタム音声
+        for speaker_name, info in self.custom_speakers.items():
+            voices.append({
+                "id": speaker_name,
+                "name": speaker_name,
+                "speaker": speaker_name,
+                "language": "auto",
+                "type": "custom",
+                "description": info.get("description", "")
+            })
+        
+        return voices
+    
+    def _get_language_from_speaker(self, speaker: str) -> str:
+        """スピーカーから言語を推定"""
+        if "中文" in speaker or "中国" in speaker:
+            return "zh"
+        elif "英文" in speaker or "English" in speaker:
+            return "en"
+        elif "日文" in speaker or "日本" in speaker:
+            return "ja"
+        elif "韩文" in speaker or "한국" in speaker:
+            return "ko"
+        else:
+            return "auto"
+    
+    async def synthesize(
+        self,
+        text: str,
+        voice: str = "alloy",
+        model: str = "cosyvoice2-0.5b",
+        response_format: str = "mp3",
+        speed: float = 1.0,
+    ) -> bytes:
+        """音声合成"""
+        if not self.model:
+            raise RuntimeError("Model not loaded")
+        
+        def _synthesize():
+            with self.model_lock:
+                try:
+                    # 音声選択
+                    if voice in self.custom_speakers:
+                        # カスタム音声使用
+                        speaker_id = voice
+                        use_zero_shot = True
+                    else:
+                        # デフォルト音声使用
+                        speaker = self.voice_mapping.get(voice, "中文女")
+                        speaker_id = speaker
+                        use_zero_shot = False
+                    
+                    # テキスト前処理
+                    processed_text = self._preprocess_text(text)
+                    
+                    # 音声合成実行
+                    if use_zero_shot and voice in self.custom_speakers:
+                        # Zero-shot合成（カスタム音声）
+                        audio_data = list(self.model.inference_zero_shot(
+                            processed_text,
+                            "",
+                            "",
+                            zero_shot_spk_id=speaker_id,
+                            stream=False
+                        ))
+                    else:
+                        # SFT合成（デフォルト音声）
+                        audio_data = list(self.model.inference_sft(
+                            processed_text,
+                            speaker_id,
+                            stream=False
+                        ))
+                    
+                    if not audio_data:
+                        raise RuntimeError("Failed to generate audio")
+                    
+                    # 音声データ取得
+                    audio_tensor = audio_data[0]['tts_speech']
+                    
+                    # 速度調整
+                    if speed != 1.0:
+                        audio_tensor = self._adjust_speed(audio_tensor, speed)
+                    
+                    # フォーマット変換
+                    return self._convert_audio_format(
+                        audio_tensor, response_format
+                    )
+                    
+                except Exception as e:
+                    logger.error(f"Synthesis failed: {e}")
+                    raise
+        
+        return await asyncio.get_event_loop().run_in_executor(
+            self.executor, _synthesize
+        )
+    
+    async def synthesize_stream(
+        self,
+        text: str,
+        voice: str = "alloy",
+        model: str = "cosyvoice2-0.5b",
+        response_format: str = "mp3",
+        speed: float = 1.0,
+    ) -> AsyncGenerator[bytes, None]:
+        """ストリーミング音声合成"""
+        if not self.model:
+            raise RuntimeError("Model not loaded")
+        
+        def _synthesize_stream():
+            with self.model_lock:
+                try:
+                    # 音声選択
+                    if voice in self.custom_speakers:
+                        speaker_id = voice
+                        use_zero_shot = True
+                    else:
+                        speaker = self.voice_mapping.get(voice, "中文女")
+                        speaker_id = speaker
+                        use_zero_shot = False
+                    
+                    # テキスト前処理
+                    processed_text = self._preprocess_text(text)
+                    
+                    # ストリーミング合成
+                    if use_zero_shot and voice in self.custom_speakers:
+                        audio_generator = self.model.inference_zero_shot(
+                            processed_text,
+                            "",
+                            "",
+                            zero_shot_spk_id=speaker_id,
+                            stream=True
+                        )
+                    else:
+                        audio_generator = self.model.inference_sft(
+                            processed_text,
+                            speaker_id,
+                            stream=True
+                        )
+                    
+                    # チャンクごとに処理
+                    for chunk in audio_generator:
+                        audio_tensor = chunk['tts_speech']
+                        
+                        if speed != 1.0:
+                            audio_tensor = self._adjust_speed(audio_tensor, speed)
+                        
+                        yield self._convert_audio_format(
+                            audio_tensor, response_format
+                        )
+                        
+                except Exception as e:
+                    logger.error(f"Streaming synthesis failed: {e}")
+                    raise
+        
+        # ストリーミング実行
+        for chunk in _synthesize_stream():
+            yield chunk
+    
+    def _preprocess_text(self, text: str) -> str:
+        """テキスト前処理"""
+        # 基本的なテキストクリーニング
+        text = text.strip()
+        
+        # 長すぎるテキストの分割対応（将来的な拡張）
+        if len(text) > self.config.max_text_length:
+            text = text[:self.config.max_text_length]
+            logger.warning(f"Text truncated to {self.config.max_text_length} characters")
+        
+        return text
+    
+    def _adjust_speed(self, audio_tensor: torch.Tensor, speed: float) -> torch.Tensor:
+        """音声速度調整"""
+        if speed == 1.0:
+            return audio_tensor
+        
+        try:
+            # PyTorchのリサンプリングを使用した簡易速度調整
+            if speed > 1.0:
+                # 高速化: ダウンサンプリング後アップサンプリング
+                new_rate = int(self.sample_rate / speed)
+                resampler_down = torchaudio.transforms.Resample(
+                    self.sample_rate, new_rate
+                )
+                resampler_up = torchaudio.transforms.Resample(
+                    new_rate, self.sample_rate
+                )
+                audio_tensor = resampler_up(resampler_down(audio_tensor))
+            else:
+                # 低速化: アップサンプリング後ダウンサンプリング
+                new_rate = int(self.sample_rate / speed)
+                resampler_up = torchaudio.transforms.Resample(
+                    self.sample_rate, new_rate
+                )
+                resampler_down = torchaudio.transforms.Resample(
+                    new_rate, self.sample_rate
+                )
+                audio_tensor = resampler_down(resampler_up(audio_tensor))
+            
+            return audio_tensor
+            
+        except Exception as e:
+            logger.warning(f"Speed adjustment failed: {e}, using original audio")
+            return audio_tensor
+    
+    def _convert_audio_format(
+        self, audio_tensor: torch.Tensor, format: str = "mp3"
+    ) -> bytes:
+        """音声フォーマット変換"""
+        try:
+            # NumPy配列に変換
+            if audio_tensor.dim() > 1:
+                audio_numpy = audio_tensor.squeeze().cpu().numpy()
+            else:
+                audio_numpy = audio_tensor.cpu().numpy()
+            
+            # メモリバッファに保存
+            buffer = io.BytesIO()
+            
+            if format == "wav":
+                sf.write(buffer, audio_numpy, self.sample_rate, format='WAV')
+            elif format == "flac":
+                sf.write(buffer, audio_numpy, self.sample_rate, format='FLAC')
+            elif format == "mp3":
+                # WAVとして一時保存してからMP3変換
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
+                    sf.write(tmp_wav.name, audio_numpy, self.sample_rate)
+                    
+                    # ffmpegでMP3変換
+                    mp3_path = tmp_wav.name.replace(".wav", ".mp3")
+                    cmd = f"ffmpeg -i {tmp_wav.name} -codec:a libmp3lame -b:a 128k {mp3_path} -y"
+                    
+                    import subprocess
+                    result = subprocess.run(
+                        cmd, shell=True, capture_output=True, text=True
+                    )
+                    
+                    if result.returncode == 0:
+                        with open(mp3_path, "rb") as f:
+                            buffer.write(f.read())
+                        os.unlink(mp3_path)
+                    else:
+                        # ffmpeg失敗時はWAVを返す
+                        logger.warning("MP3 conversion failed, returning WAV")
+                        buffer.seek(0)
+                        sf.write(buffer, audio_numpy, self.sample_rate, format='WAV')
+                    
+                    os.unlink(tmp_wav.name)
+            else:
+                # デフォルト: WAV
+                sf.write(buffer, audio_numpy, self.sample_rate, format='WAV')
+            
+            buffer.seek(0)
+            return buffer.read()
+            
+        except Exception as e:
+            logger.error(f"Audio format conversion failed: {e}")
+            raise
+    
+    async def clone_voice(
+        self, audio_path: str, speaker_name: str, description: str = None
+    ) -> bool:
+        """音声クローニング"""
+        if not self.model:
+            raise RuntimeError("Model not loaded")
+        
+        def _clone_voice():
+            try:
+                # 音声ファイル読み込み
+                from cosyvoice.utils.file_utils import load_wav
+                
+                prompt_speech = load_wav(audio_path, 16000)
+                
+                # Zero-shotスピーカー追加
+                success = self.model.add_zero_shot_spk(
+                    description or f"Cloned voice: {speaker_name}",
+                    prompt_speech,
+                    speaker_name
+                )
+                
+                if success:
+                    # カスタムスピーカー情報保存
+                    self.custom_speakers[speaker_name] = {
+                        "description": description,
+                        "created_at": time.time(),
+                        "audio_path": audio_path,
+                    }
+                    logger.info(f"Voice cloned successfully: {speaker_name}")
+                
+                return success
+                
+            except Exception as e:
+                logger.error(f"Voice cloning failed: {e}")
+                return False
+        
+        return await asyncio.get_event_loop().run_in_executor(
+            self.executor, _clone_voice
+        )
+    
+    async def delete_voice(self, speaker_name: str) -> bool:
+        """音声削除"""
+        if speaker_name in self.custom_speakers:
+            del self.custom_speakers[speaker_name]
+            # モデルからも削除（CosyVoiceのAPIがあれば）
+            return True
+        return False
+    
+    async def cleanup(self):
+        """クリーンアップ"""
+        if self.executor:
+            self.executor.shutdown(wait=True)
+        
+        if self.model:
+            # GPUメモリ解放
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        
+        logger.info("CosyVoice client cleaned up")
