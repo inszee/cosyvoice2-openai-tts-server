@@ -35,6 +35,11 @@ class Config(BaseSettings):
         default="./pretrained_models/CosyVoice2-0.5B",
         env="MODEL_PATH"
     )
+    default_spk_voice_path: str = Field(
+        default="./voices",
+        env="DEFAULT_SPK_VOICES_PATH"
+    )
+    
     device: str = Field(default="auto", env="DEVICE")  # auto, cpu, cuda
     fp16: bool = Field(default=True, env="FP16")
     streaming_enabled: bool = Field(default=True, env="STREAMING")
@@ -91,7 +96,7 @@ class Config(BaseSettings):
     @property
     def model_config_path(self) -> str:
         """モデル設定ファイルパス"""
-        return os.path.join(self.model_path, "cosyvoice.yaml")
+        return os.path.join(self.model_path, "cosyvoice2.yaml")
     
     @property
     def model_weights_path(self) -> str:

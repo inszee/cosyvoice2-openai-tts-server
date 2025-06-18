@@ -1,0 +1,11 @@
+{
+    "sample_rate": 16000,
+    "wav_files": {
+      "linzhiling.wav": {
+        "id": "linzhiling",
+        "speaker": "中文女",
+        "spk2info_path": "linzhiling_spk2info.pt",
+        "prompt_text": "现在这通是甜蜜的来电哦，现在请先把所有的不愉快抛开，穿起美丽的衣服，带着幸福的微笑，陪你最愉快的心情，接电话咯。"
+      }
+    }
+  }

@@ -1,0 +1,5 @@
+bash: ./start_server.sh > output.log 2>&1 && echo "Application finished.": No such file or directory
+bash: start_server.sh > output.log 2>&1 && echo "Application finished.": No such file or directory
+bash: ./start_server.sh > output.log 2>&1 && echo "Application finished.": No such file or directory
+bash: ./start_server.sh > output.log 2>&1 && echo "Application finished.": No such file or directory
+bash: /workspace/cosyvoice2-openai-tts-server/start_server.sh > output.log 2>&1 && echo "Application finished.": No such file or directory
