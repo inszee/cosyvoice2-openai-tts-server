@@ -57,7 +57,7 @@ def test_server():
     try:
         data = {
             "model": "cosyvoice2-0.5b",
-            "input": "人类不断挑战极限，在这一过程中超越自我，攀登新的高度。登山作为一项古老的极限运动，自古以来就吸引了无数冒险者，即使在现代，依然是许多人的热爱。",
+            "input": "你好主人，我是念念，你的数字人小助手。今天也要一起加油哦！",
             "voice": "linzhiling",
             "response_format": "wav",
             "speed": 1.0

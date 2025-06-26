@@ -17,7 +17,8 @@ import time
 import json
 from pathlib import Path
 from typing import AsyncGenerator, Dict, List, Optional, Tuple
-
+from cosyvoice.vllm.cosyvoice2 import CosyVoice2ForCausalLM
+from vllm import ModelRegistry
 import numpy as np
 import soundfile as sf
 import torch
@@ -27,6 +28,7 @@ from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
+ModelRegistry.register_model("CosyVoice2ForCausalLM", CosyVoice2ForCausalLM)
 
 class CosyVoiceClient:
     """CosyVoice2クライアント"""
@@ -138,11 +140,12 @@ class CosyVoiceClient:
                 # モデル初期化
                 self.model = CosyVoice2(
                     self.config.model_path,
-                    load_jit=False,
-                    load_trt=False,
-                    load_vllm=False,
+                    load_jit=True,
+                    load_trt=True,
+                    load_vllm=True,
                     fp16=self.config.fp16
                 )
+                
                 default_spk_voice_dir = Path(self.config.default_spk_voice_path)
                 default_spk_voice_dir.mkdir(parents=True, exist_ok=True)
 
