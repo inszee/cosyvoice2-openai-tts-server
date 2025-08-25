@@ -3,12 +3,14 @@
   "wav_files": {
     "linzhiling.wav": {
       "id": "linzhiling",
-      "speaker": "中文女",
+      "customer_id": "customer123",
+      "speaker": "中文女声",
       "spk2info_path": "linzhiling_spk2info.pt",
       "prompt_text": "现在这通是甜蜜的来电哦，现在请先把所有的不愉快抛开，穿起美丽的衣服，带着幸福的微笑，陪你最愉快的心情，接电话咯。"
     },
     "baiyansong.wav": {
       "id": "baiyansong",
+      "customer_id": "default",
       "speaker": "中文男",
       "spk2info_path": "baiyansong_spk2info.pt",
       "prompt_text": "在三十岁之前要玩命的做加法，要去尝试，你不知道自己有多少种可能，你也不知道命运将会给你怎样的机缘，所以不试你怎么知道呢？"

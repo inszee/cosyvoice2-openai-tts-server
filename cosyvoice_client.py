@@ -163,25 +163,39 @@ class CosyVoiceClient:
                     prompt_text  = config_item["prompt_text"]
                     prompt_speech_16k_wav = os.path.join(default_spk_voice_dir, f"{spk_id}.wav")
                     prompt_speech_16k = load_wav(prompt_speech_16k_wav, 16000)
+
+                    # 如果文件已存在，加载到 self.spk2info 中
                     if os.path.exists(spk2info_path):
+                        # 注意：这里我们只加载并更新 self.spk2info 中当前 speaker 的部分
+                        # 因为我们假定 spk2info_path 文件只包含这个 speaker 的信息
                         self.spk2info[speaker] = torch.load(spk2info_path, map_location=self.model.frontend.device)
                     else:
+                        # 如果文件不存在，则确保字典中不包含此 speaker 的信息
                         if speaker in self.spk2info:
                             del self.spk2info[speaker]
 
+                    # 如果当前 speaker 的信息不在 self.spk2info 中
                     if speaker not in self.spk2info:
-                        # 获取音色embedding
+                        # 获取音色embedding、语音特征和语音token
                         embedding = self.model.frontend._extract_spk_embedding(prompt_speech_16k)
-                        # 获取语音特征
                         prompt_speech_resample = torchaudio.transforms.Resample(orig_freq=16000, new_freq=self.model.sample_rate)(prompt_speech_16k)
                         speech_feat, speech_feat_len = self.model.frontend._extract_speech_feat(prompt_speech_resample)
-                        # 获取语音token
                         speech_token, speech_token_len = self.model.frontend._extract_speech_token(prompt_speech_16k)
-                        # 将音色embedding、语音特征和语音token保存到字典中
-                        self.spk2info[speaker] = {'embedding': embedding,
-                                            'speech_feat': speech_feat, 'speech_token': speech_token}
-                        # 保存音色embedding
-                        torch.save(self.spk2info, spk2info_path)
+
+                        # 创建一个临时的字典，只包含当前 speaker 的信息
+                        current_spk_info = {
+                            'embedding': embedding,
+                            'speech_feat': speech_feat,
+                            'speech_token': speech_token
+                        }
+                        
+                        # 将信息保存到 self.spk2info 中
+                        self.spk2info[speaker] = current_spk_info
+                        
+                        # ⚠️ 关键改动：只保存当前 speaker 的信息到独立文件
+                        # 我们创建一个小字典来保存，避免保存整个 self.spk2info
+                        torch.save(current_spk_info, spk2info_path)
+                    
                     self.voice_mapping[spk_id] = speaker
                     self.voice_prompt_mapping[spk_id] = prompt_text
 
@@ -204,13 +218,18 @@ class CosyVoiceClient:
         """GPU使用可能性確認"""
         return torch.cuda.is_available() and self.config.device != "cpu"
     
+    # 定义默认生成克隆声音的pt信息接口
+    def add_custom_voice_mapping(self) -> bool:
+        return false
+
     # 定义一个文本到语音的函数，参数包括文本内容、是否流式处理、语速和是否使用文本前端处理
     def tts_sft(self, tts_text, speaker_id,stream=False, speed=1.0, text_frontend=True):
+        logger.info(f"tts_sft speaker_id: {speaker_id}")
         prompt_text =  self.voice_prompt_mapping[speaker_id]
         speaker = self.voice_mapping[speaker_id]
-        speaker_info = self.spk2info[speaker][speaker]
-        # self.spk2info[speaker] = {'中文女': {}}.... 
-        # speaker_info = self.spk2info[speaker][speaker]
+        logger.info(f"tts_sft speaker: {speaker}")
+        speaker_info = self.spk2info[speaker]
+        logger.info(f"tts_sft speaker_info[speaker]:{self.spk2info[speaker]}")
         for i in tqdm(self.model.frontend.text_normalize(tts_text, split=True, text_frontend=text_frontend)):
             # 提取文本的token和长度
             tts_text_token, tts_text_token_len = self.model.frontend._extract_text_token(i)
@@ -293,7 +312,7 @@ class CosyVoiceClient:
                         use_zero_shot = True
                     else:
                         # デフォルト音声使用
-                        speaker = self.voice_mapping.get(voice, "中文女")
+                        speaker = self.voice_mapping.get(voice, "中文女声")
                         speaker_id = speaker
                         use_zero_shot = False
                     
@@ -363,7 +382,7 @@ class CosyVoiceClient:
                         speaker_id = voice
                         use_zero_shot = True
                     else:
-                        speaker = self.voice_mapping.get(voice, "中文女")
+                        speaker = self.voice_mapping.get(voice, "中文女声")
                         speaker_id = speaker
                         use_zero_shot = False
                     
@@ -546,6 +565,84 @@ class CosyVoiceClient:
             self.executor, _clone_voice
         )
     
+    async def clone_voice_saved(self) -> bool:
+        """
+        Clones a voice from a pre-saved configuration.
+
+        Args:
+            speaker_info (Dict[str, Any]): A dictionary containing the speaker's
+                                        information and paths.
+
+        Returns:
+            bool: True if cloning is successful, False otherwise.
+        """
+        def saved_clone_voice() -> bool:
+            try:
+                from cosyvoice.utils.file_utils import load_wav
+                
+                default_spk_voice_dir = Path(self.config.default_spk_voice_path)
+                default_spk_voice_config = os.path.join(default_spk_voice_dir, "config.json")
+
+                json_config = self.load_config(default_spk_voice_config)
+                json_file_configs = self.apply_per_file_config(default_spk_voice_dir, json_config)
+                logging.info("clone_voice_saved files_config:\n%s", json.dumps(json_file_configs, indent=2, ensure_ascii=False))
+                start = time.time()
+                model_dir = Path(self.config.model_path)
+                for spk_id in json_file_configs:
+                    config_item = json_file_configs[spk_id]
+                    spk2info_path = os.path.join(model_dir, config_item["spk2info_path"])
+                    speaker = config_item["speaker"]
+                    prompt_text  = config_item["prompt_text"]
+                    prompt_speech_16k_wav = os.path.join(default_spk_voice_dir, f"{spk_id}.wav")
+                    prompt_speech_16k = load_wav(prompt_speech_16k_wav, 16000)
+
+                    # 如果文件已存在，加载到 self.spk2info 中
+                    if os.path.exists(spk2info_path):
+                        # 注意：这里我们只加载并更新 self.spk2info 中当前 speaker 的部分
+                        # 因为我们假定 spk2info_path 文件只包含这个 speaker 的信息
+                        self.spk2info[speaker] = torch.load(spk2info_path, map_location=self.model.frontend.device)
+                    else:
+                        # 如果文件不存在，则确保字典中不包含此 speaker 的信息
+                        if speaker in self.spk2info:
+                            del self.spk2info[speaker]
+
+                    # 如果当前 speaker 的信息不在 self.spk2info 中
+                    if speaker not in self.spk2info:
+                        # 获取音色embedding、语音特征和语音token
+                        embedding = self.model.frontend._extract_spk_embedding(prompt_speech_16k)
+                        prompt_speech_resample = torchaudio.transforms.Resample(orig_freq=16000, new_freq=self.model.sample_rate)(prompt_speech_16k)
+                        speech_feat, speech_feat_len = self.model.frontend._extract_speech_feat(prompt_speech_resample)
+                        speech_token, speech_token_len = self.model.frontend._extract_speech_token(prompt_speech_16k)
+
+                        # 创建一个临时的字典，只包含当前 speaker 的信息
+                        current_spk_info = {
+                            'embedding': embedding,
+                            'speech_feat': speech_feat,
+                            'speech_token': speech_token
+                        }
+                        
+                        # 将信息保存到 self.spk2info 中
+                        self.spk2info[speaker] = current_spk_info
+                        
+                        # ⚠️ 关键改动：只保存当前 speaker 的信息到独立文件
+                        # 我们创建一个小字典来保存，避免保存整个 self.spk2info
+                        torch.save(current_spk_info, spk2info_path)
+                    
+                    self.voice_mapping[spk_id] = speaker
+                    self.voice_prompt_mapping[spk_id] = prompt_text
+
+                load_time = time.time() - start
+                logging.info("clone_voice_saved Load time: %.3f seconds", load_time)
+                self.sample_rate = self.model.sample_rate
+                logger.info(f"clone_voice_saved Model loaded, sample rate: {self.sample_rate}")
+                
+            except Exception as e:
+                logger.error(f"Failed to saved_clone_voice: {e}")
+                return False
+        
+        await asyncio.get_event_loop().run_in_executor(self.executor, saved_clone_voice)
+        return True
+
     async def delete_voice(self, speaker_name: str) -> bool:
         """音声削除"""
         if speaker_name in self.custom_speakers:

@@ -11,6 +11,7 @@ import logging
 import os
 import tempfile
 import time
+import json
 from contextlib import asynccontextmanager
 from io import BytesIO
 from pathlib import Path
@@ -219,6 +220,88 @@ async def clone_voice(
         logger.error(f"Voice cloning failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/v1/voice/clone_generate")
+async def clone_generate(
+    voice_sample: UploadFile = File(...),
+    speaker_name_id: str = Form(...),
+    speaker_name:  str = Form(...),
+    customer_id: str = Form(...),
+    description: Optional[str] = Form(None),
+):
+    if cosyvoice_client is None:
+        raise HTTPException(status_code=503, detail="Service not ready")
+    
+    try:
+        if not voice_sample.content_type.startswith("audio/"):
+            raise HTTPException(status_code=400, detail="Invalid audio file")
+
+        if not os.path.exists(config.default_spk_voice_path):
+            os.makedirs(config.default_spk_voice_path)
+
+        # 1. Check for a unique filename to prevent overwriting
+        unique_filename = f"{speaker_name_id}.wav"
+        file_path = os.path.join(config.default_spk_voice_path, unique_filename)
+        
+        if os.path.exists(file_path):
+            raise HTTPException(status_code=409, detail=f"Speaker '{speaker_name_id}' already exists.")
+
+        config_filename = f"config.json"
+        config_file_path = os.path.join(config.default_spk_voice_path, config_filename)
+
+        async with aiofiles.open(file_path, 'wb') as out_file:
+            content = await voice_sample.read()
+            await out_file.write(content)
+            
+        try:
+            with open(config_file_path, 'r+', encoding='utf-8') as f:
+                config_data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            config_data = {
+                "sample_rate": 16000,
+                "wav_files": {}
+            }
+        
+        spk2_info_name = f"{speaker_name_id}_spk2info.pt"
+        
+        config_data["wav_files"][unique_filename] = {
+            "id": speaker_name_id, # Assign a unique ID to avoid conflicts
+            "customer_id": customer_id, # 2. Added new parameter
+            "speaker": speaker_name,
+            "spk2info_path": spk2_info_name,
+            "prompt_text": description or ""
+        }
+
+        with open(config_file_path, 'w', encoding='utf-8') as f:
+            json.dump(config_data, f, indent=2, ensure_ascii=False)
+            
+        try:
+            success = await cosyvoice_client.clone_voice_saved()
+            
+            if success:
+                return {"status": "success", "customer_id": customer_id,"speaker_name": speaker_name}
+            else:
+                raise HTTPException(status_code=500, detail="Voice cloning failed")
+                
+        except Exception as e:
+            # Add rollback logic here if needed
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            
+            # Remove the entry from config_data before raising the exception
+            if speaker_name_id in config_data["wav_files"]:
+                del config_data["wav_files"][speaker_name_id]
+                with open(config_file_path, 'w', encoding='utf-8') as f:
+                    json.dump(config_data, f, indent=2, ensure_ascii=False)
+            
+            raise e
+            
+    except HTTPException as http_exc:
+        # Re-raise HTTPException to be handled by FastAPI
+        raise http_exc
+    except Exception as e:
+        if logger:
+            logger.error(f"Voice clone_generate failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/v1/voice/{speaker_name}")
 async def delete_voice(speaker_name: str):
