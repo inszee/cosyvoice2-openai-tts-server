@@ -278,7 +278,7 @@ async def clone_generate(
             success = await cosyvoice_client.clone_voice_saved()
             
             if success:
-                return {"status": "success", "customer_id": customer_id,"speaker_name": speaker_name}
+                return {"status": "success", "customer_id": customer_id,"speaker_name_id":speaker_name_id,"speaker_name": speaker_name}
             else:
                 raise HTTPException(status_code=500, detail="Voice cloning failed")
                 
